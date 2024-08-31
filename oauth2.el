@@ -3,7 +3,7 @@
 ;; Copyright (C) 2011-2021 Free Software Foundation, Inc
 
 ;; Author: Julien Danjou <julien@danjou.info>
-;; Version: 0.16
+;; Version: 0.17
 ;; Keywords: comm
 ;; Package-Requires: ((cl-lib "0.5") (nadvice "0.3"))
 
@@ -53,18 +53,34 @@
   :link '(url-link :tag "Savannah" "https://git.savannah.gnu.org/cgit/emacs/elpa.git/tree/?h=externals/oauth2")
   :link '(url-link :tag "ELPA" "https://elpa.gnu.org/packages/oauth2.html"))
 
+(defvar oauth2-debug nil
+  "Enable verbose logging in oauth2 to help debugging.")
+
+(defun oauth2--do-debug (&rest msg)
+  "Output debug messages when `oauth2-debug' is enabled."
+  (when oauth2-debug
+    (setcar msg (concat "[oauth2] " (car msg)))
+    (apply #'message msg)))
+
 (defun oauth2-request-authorization (auth-url client-id &optional scope state redirect-uri)
   "Request OAuth authorization at AUTH-URL by launching `browse-url'.
 CLIENT-ID is the client id provided by the provider.
 It returns the code provided by the service."
-  (browse-url (concat auth-url
-                      (if (string-match-p "\?" auth-url) "&" "?")
-                      "client_id=" (url-hexify-string client-id)
-                      "&response_type=code"
-                      "&redirect_uri=" (url-hexify-string (or redirect-uri "urn:ietf:wg:oauth:2.0:oob"))
-                      (if scope (concat "&scope=" (url-hexify-string scope)) "")
-                      (if state (concat "&state=" (url-hexify-string state)) "")))
-  (read-string "Enter the code your browser displayed: "))
+  (let ((url (concat auth-url
+                     (if (string-match-p "\?" auth-url) "&" "?")
+                     "client_id=" (url-hexify-string client-id)
+                     "&response_type=code"
+                     "&redirect_uri=" (url-hexify-string (or redirect-uri "urn:ietf:wg:oauth:2.0:oob"))
+                     (if scope (concat "&scope=" (url-hexify-string scope)) "")
+                     (if state (concat "&state=" (url-hexify-string state)) "")
+                     ;; The following two parameters are required for Gmail
+                     ;; OAuth2 to generate the refresh token
+                     "&access_type=offline"
+                     "&prompt=consent")))
+    (browse-url url)
+    (read-string (concat "Follow the instruction on your default browser, or "
+                         "visit:\n" url
+                         "\nEnter the code your browser displayed: "))))
 
 (defun oauth2-request-access-parse ()
   "Parse the result of an OAuth request."
@@ -74,14 +90,18 @@ It returns the code provided by the service."
 
 (defun oauth2-make-access-request (url data)
   "Make an access request to URL using DATA in POST."
-  (let ((url-request-method "POST")
-        (url-request-data data)
-        (url-request-extra-headers
-         '(("Content-Type" . "application/x-www-form-urlencoded"))))
-    (with-current-buffer (url-retrieve-synchronously url)
-      (let ((data (oauth2-request-access-parse)))
-        (kill-buffer (current-buffer))
-        data))))
+  (let ((func-name (nth 1 (backtrace-frame 3))))
+    (oauth2--do-debug "%s: url: %s" func-name url)
+    (oauth2--do-debug "%s: data: %s" func-name data)
+    (let ((url-request-method "POST")
+          (url-request-data data)
+          (url-request-extra-headers
+           '(("Content-Type" . "application/x-www-form-urlencoded"))))
+      (with-current-buffer (url-retrieve-synchronously url)
+        (let ((data (oauth2-request-access-parse)))
+          (kill-buffer (current-buffer))
+          (oauth2--do-debug "%s: response: %s" func-name (prin1-to-string data))
+          data)))))
 
 (cl-defstruct oauth2-token
   plstore
@@ -101,13 +121,14 @@ Return an `oauth2-token' structure."
     (let ((result
            (oauth2-make-access-request
             token-url
-            (concat
-             "client_id=" client-id
-	     (when client-secret
-               (concat  "&client_secret=" client-secret))
-             "&code=" code
-             "&redirect_uri=" (url-hexify-string (or redirect-uri "urn:ietf:wg:oauth:2.0:oob"))
-             "&grant_type=authorization_code"))))
+            (url-encode-url
+             (concat
+              "client_id=" client-id
+              (when client-secret
+                (concat  "&client_secret=" client-secret))
+              "&code=" code
+              "&redirect_uri=" (or redirect-uri "urn:ietf:wg:oauth:2.0:oob")
+              "&grant_type=authorization_code")))))
       (make-oauth2-token :client-id client-id
                          :client-secret client-secret
                          :access-token (cdr (assoc 'access_token result))
@@ -158,17 +179,17 @@ TOKEN should be obtained with `oauth2-request-access'."
   :group 'oauth2
   :type 'file)
 
-(defun oauth2-compute-id (auth-url token-url scope)
+(defun oauth2-compute-id (auth-url token-url scope client-id)
   "Compute an unique id based on URLs.
 This allows to store the token in an unique way."
-  (secure-hash 'md5 (concat auth-url token-url scope)))
+  (secure-hash 'sha512 (concat auth-url token-url scope client-id)))
 
 ;;;###autoload
 (defun oauth2-auth-and-store (auth-url token-url scope client-id client-secret &optional redirect-uri state)
   "Request access to a resource and store it using `plstore'."
   ;; We store a MD5 sum of all URL
   (let* ((plstore (plstore-open oauth2-token-file))
-         (id (oauth2-compute-id auth-url token-url scope))
+         (id (oauth2-compute-id auth-url token-url scope client-id))
          (plist (cdr (plstore-get plstore id))))
     ;; Check if we found something matching this access
     (if plist
