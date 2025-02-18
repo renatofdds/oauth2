@@ -248,7 +248,6 @@ This allows to store the token in an unique way."
                              url-callback-function
                              url-callback-arguments)
       ;; This is to make `url' think it's done.
-      (when (boundp 'success) (setq success t)) ;For URL library in Emacs<24.4.
       t)))                                      ;For URL library in Emacs≥24.4.
 (advice-add 'url-http-handle-authentication :around
             #'oauth2--url-http-handle-authentication-hack)
